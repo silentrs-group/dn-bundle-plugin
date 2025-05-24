@@ -31,55 +31,123 @@ class DevelNextBundle
     public function build(Event $e){
         Tasks::run('build', []);
 
-        $buildFileName = "{$e->package()->getName()}-{$e->package()->getVersion('last')}";
+        $packageName = $e->package()->getName();
+
+        $buildFileName = "{$packageName}-{$e->package()->getVersion('last')}";
 
         Tasks::createDir('bundle');
         Tasks::cleanDir('bundle');
+
+
+
+        // ------------------------------------------------------
+        // *                build config section                *
+        // ------------------------------------------------------
 
         $resourceConf = new Configuration();
         $resourceConf->put($e->package()->getAny('develnext-bundle'));
         $resourceConf->save("bundle/.resource");
 
+        
 
-        Tasks::createFile("bundle/dn-{$e->package()->getName()}-bundle.jar");
-        $bundle = new ZipArchive("bundle/dn-{$e->package()->getName()}-bundle.jar");
+        $config = $e->package()->getAny('develnext-bundle-config');
+
+        // ------------------------------------------------------
+        // *     make main jar file from src-bundle directory   *
+        // ------------------------------------------------------
+
+        Tasks::createFile("bundle/dn-{$packageName}-bundle.jar");
+
+        $bundle = new ZipArchive("bundle/dn-{$packageName}-bundle.jar");
         $bundle->open();
-        fs::scan("src-bundle", function(File $file)use($bundle){
-            if($file->isFile()){
+        
+        fs::scan("src-bundle", function(File $file) use ($bundle, $config){
+            if ($file->isFile()) {
+
+                // exclude files
+                if (isset($config["exclude"])) {
+                    foreach ($config["exclude"] as $exclude) {
+                        if (str::startsWith(fs::normalize($file), $exclude)) {
+                            Console::log("Skip file: " . ((string) $file));
+                            return;
+                        }
+                    }
+                }
+
                 $bundle->addFile($file, fs::relativize($file, "src-bundle"));
             }
         });
         $bundle->close();
 
+
+
+        // ------------------------------------------------------
+        // *        TODO: here need make extra jar files        *
+        // ------------------------------------------------------
+
+        if (isset($config["extraJar"])) {
+            foreach ($config["extraJar"] as $jar) {
+                $bundle = new ZipArchive("jars/{$jar['name']}");
+                $bundle->open();
+
+                foreach ($jar["files"] as $source) {
+                    fs::scan($source, function(File $file) use ($bundle, $source) {
+                        if ($file->isFile()) {
+                            $bundle->addFile($file, fs::relativize($file, fs::parent($source)));
+                        }
+                    });
+
+                    $bundle->close();
+                }
+            }
+        }
+        
+
+
+        // ------------------------------------------------------
+        // *                 make dnbundle file                 *
+        // ------------------------------------------------------
+
         Tasks::createFile("bundle/{$buildFileName}.dnbundle");
 
         $out = new ZipArchive("bundle/{$buildFileName}.dnbundle");
         $out->open();
-        $out->addFile("bundle/dn-{$e->package()->getName()}-bundle.jar", "bundle/dn-{$e->package()->getName()}-bundle.jar");
+        $out->addFile("bundle/dn-{$packageName}-bundle.jar", "bundle/dn-{$packageName}-bundle.jar");
         $out->addFile("bundle/.resource", ".resource");
 
         /** @var File $extFile */
         $extFile = null;
 
-        fs::scan('jars', function(File $file)use($out,&$extFile){
+
+
+        // ------------------------------------------------------
+        // *                  add all jar files                 *
+        // ------------------------------------------------------
+        fs::scan('jars', function (File $file) use ($out, &$extFile) {
             if(!$extFile) {
                 $jar = new ZipArchive($file);
 
                 $entry = $jar->read('META-INF/services/php.runtime.ext.support.Extension');
-                if($entry){
+
+                if ($entry) {
                     $extFile = $file;
                     return;
                 }
 
             }
+
             $out->addFile($file, "bundle/{$file->getName()}");
         });
-        if($extFile){
+
+        if ($extFile) {
             Tasks::createDir("bundle/ext");
+            
             $input = new ZipArchiveInput($extFile);
-            while($entry = $input->nextEntry()){
-                if($input->canReadEntryData($entry) && !$entry->isDirectory()){
+
+            while ($entry = $input->nextEntry()) {
+                if ($input->canReadEntryData($entry) && !$entry->isDirectory()) {
                     $name = "bundle/ext/{$entry->name}";
+
                     fs::ensureParent($name);
                     fs::copy($input->stream(), $name);
                 }
@@ -88,24 +156,27 @@ class DevelNextBundle
             Tasks::copy("sdk", "bundle/ext/JPHP-INF/sdk");
             $jar = new ZipArchive("bundle/{$extFile->getName()}");
             $jar->open();
-            fs::scan("bundle/ext", function(File $file)use($jar){
-                if($file->isFile()) {
+            fs::scan("bundle/ext", function(File $file) use ($jar) {
+                if ($file->isFile()) {
                     $jar->addFile($file, fs::relativize($file, "bundle/ext"));
                 }
             });
             $jar->close();
             $out->addFile("bundle/{$extFile->getName()}", "bundle/{$extFile->getName()}");
         }
+
         $out->close();
 
         Tasks::deleteFile("bundle/.resource", true);
-        if($extFile){
+        
+        if ($extFile) {
             Tasks::deleteFile("bundle/{$extFile->getName()}", true);
         }
-        Tasks::deleteFile("bundle/dn-{$e->package()->getName()}-bundle.jar", true);
+
+        Tasks::deleteFile("bundle/dn-{$packageName}-bundle.jar", true);
         Tasks::cleanDir("bundleext", [], true);
         Tasks::deleteFile("bundle/ext", true);
 
-        Console::log("You can find bundle in ".fs::abs("bundle/{$buildFileName}.dnbundle"));
+        Console::log("You can find bundle in " . fs::abs("bundle/{$buildFileName}.dnbundle"));
     }
 }
