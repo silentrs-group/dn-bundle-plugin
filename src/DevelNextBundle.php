@@ -3,16 +3,12 @@
 use packager\{
     cli\Console, Event, JavaExec, Packager, Vendor, Colors
 };
-use compress\ZipArchive;
-use php\io\File;
-use php\lib\str;
+
+use php\lib\{str, fs, arr};
 use php\util\Configuration;
-use php\lib\fs;
-use compress\ZipArchiveEntry;
-use php\io\FileStream;
-use php\lib\arr;
-use php\io\MiscStream;
-use compress\ZipArchiveInput;
+use compress\{ZipArchive, ZipArchiveEntry, ZipArchiveInput};
+use php\io\{File, FileStream, MiscStream};
+
 
 
 /**
@@ -21,15 +17,16 @@ use compress\ZipArchiveInput;
  *
  * @jppm-task build as build
  * @jppm-task init as init
+ * @jppm-task initScriptComponent as initScriptComponent
  */
 class DevelNextBundle
 {
     /**
      * @jppm-need-package
      * @jppm-description Build project and create dnbundle.
-     * @param Event $event
+     * @param Event $e
      */
-    public function build(Event $e){
+    public function build(Event $e) {
         Tasks::run('build', []);
 
         $packageName = $e->package()->getName();
@@ -49,7 +46,7 @@ class DevelNextBundle
         $resourceConf->put($e->package()->getAny('develnext-bundle'));
         $resourceConf->save("bundle/.resource");
 
-        
+
 
         $config = $e->package()->getAny('develnext-bundle-config');
 
@@ -62,7 +59,7 @@ class DevelNextBundle
         $bundle = new ZipArchive("bundle/dn-{$packageName}-bundle.jar");
         $bundle->open();
         
-        fs::scan("src-bundle", function(File $file) use ($bundle, $config){
+        fs::scan("src-bundle", function(File $file) use ($bundle, $config) {
             if ($file->isFile()) {
 
                 // exclude files
@@ -78,6 +75,16 @@ class DevelNextBundle
                 $bundle->addFile($file, fs::relativize($file, "src-bundle"));
             }
         });
+
+
+        $prefix = str::replace($resourceConf->get("class"), "\\", ".");
+
+        fs::scan("src", function(File $file) use ($bundle, $prefix) {
+            if ($file->isFile()) {
+                $bundle->addFile($file, "vendor/{$prefix}/" . fs::relativize($file, "src"));
+            }
+        });
+
         $bundle->close();
 
 
@@ -102,7 +109,7 @@ class DevelNextBundle
                 }
             }
         }
-        
+
 
 
         // ------------------------------------------------------
@@ -125,7 +132,7 @@ class DevelNextBundle
         // *                  add all jar files                 *
         // ------------------------------------------------------
         fs::scan('jars', function (File $file) use ($out, &$extFile) {
-            if(!$extFile) {
+            if (!$extFile) {
                 $jar = new ZipArchive($file);
 
                 $entry = $jar->read('META-INF/services/php.runtime.ext.support.Extension');
@@ -142,7 +149,7 @@ class DevelNextBundle
 
         if ($extFile) {
             Tasks::createDir("bundle/ext");
-            
+
             $input = new ZipArchiveInput($extFile);
 
             while ($entry = $input->nextEntry()) {
@@ -155,8 +162,10 @@ class DevelNextBundle
             }
 
             Tasks::copy("sdk", "bundle/ext/JPHP-INF/sdk");
+
             $jar = new ZipArchive("bundle/{$extFile->getName()}");
             $jar->open();
+
             fs::scan("bundle/ext", function(File $file) use ($jar) {
                 if ($file->isFile()) {
                     $jar->addFile($file, fs::relativize($file, "bundle/ext"));
@@ -169,7 +178,7 @@ class DevelNextBundle
         $out->close();
 
         Tasks::deleteFile("bundle/.resource", true);
-        
+
         if ($extFile) {
             Tasks::deleteFile("bundle/{$extFile->getName()}", true);
         }
@@ -183,8 +192,8 @@ class DevelNextBundle
 
     /**
      * @jppm-need-package
-     * @jppm-description init bundle path structure.
-     * @param Event $event
+     * @jppm-description init bundle path and files structure.
+     * @param Event $e
      */
     public function init (Event $e)
     {
@@ -196,10 +205,10 @@ class DevelNextBundle
         }
 
         $rootDir   = 'src-bundle';
-        
+
         $className = fs::name($config["class"]);
         $namespace = str::lower(fs::parent($config["class"]));
-        
+
         $iconFile  = sprintf('%s/.data/img/%s/%s', $rootDir, str::lower(fs::parent($config["icon"])), fs::name($config["icon"]));
         $classFile = sprintf('%s/%s/%s.php', $rootDir, $namespace, $className);
 
@@ -210,12 +219,46 @@ class DevelNextBundle
         $this->makeBlankIcon($iconFile);
     }
 
+    /**
+     * @jppm-need-package
+     * @jppm-description init bundle scriptComponent path and files structure.
+     * @param Event $e
+     */
+    public function initScriptComponent (Event $e)
+    {
+        $config = $e->package()->getAny('develnext-bundle');
+
+        $name = fs::name($config["class"]);
+        $nameWithoutBundle = str::sub($name, 0, str::length($name) - 6);
+
+        $r = \templates\ScriptComponentTemplate::getData(
+            fs::parent($config["class"]),
+            $name,
+            fs::name(fs::parent($config["class"])),
+            $nameWithoutBundle,
+            "bundle\\" . fs::name(fs::parent($config["class"])),
+            $config["class"]
+        );
+
+        if (is_array($r)) {
+            Tasks::run('bundle:init');
+        }
+
+        foreach ($r as $file) {
+            $path = 'src-bundle/';
+
+            fs::ensureParent($path  . fs::parent($file["filepath"]));
+            fs::makeFile($path  . $file["filepath"]);
+
+            FileStream::putContents($path  . $file["filepath"], $file["filedata"]);
+        }
+    }
+
     private function makeClassFile ($classFile, $namespace, $className)
     {
         fs::makeFile($classFile);
 
-        $classTemplate = <<<'PHP_CLASS'
-<?php
+        $classTemplate = '<?php
 
 namespace %namespace%;
 
@@ -224,8 +267,7 @@ use ide\bundle\AbstractJarBundle;
 class %className% extends AbstractJarBundle
 {
     // Autogenerated file
-}
-PHP_CLASS;
+}';
 
         FileStream::putContents($classFile, str_replace(
             ["%namespace%", "%className%"],
